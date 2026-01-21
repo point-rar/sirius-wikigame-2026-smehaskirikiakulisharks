@@ -19,7 +19,7 @@ class WikiParser(ABC):
 class WikiParserDumb(WikiParser):
     def __init__(self):
         self.session = requests.Session()
-
+        self.session.headers.update({"User-Agent": "WikiGame/1.0 (contact: your_email@example.com)"})
     def __get_page(self, page_name: str) -> str:
         # See: https://en.wikipedia.org/w/api.php?action=help&modules=parse
         # https://en.wikipedia.org/w/api.php, https://ru.wikipedia.org/w/api.php
