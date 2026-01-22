@@ -41,6 +41,7 @@ class WikiGameDumb(WikiGame):
             links = self.wiki_parser.get_links(cur_page.page_name)
             for link in links:
                 next_page_name = link.title
+                print(link.title)
 
                 if next_page_name == end_page_name:
                     logger.success("Path found!")

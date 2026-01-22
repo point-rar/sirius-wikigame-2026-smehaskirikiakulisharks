@@ -30,13 +30,14 @@ if __name__ == '__main__':
     wiki_game = None
     if args.gametype == 'dumb':
         wiki_game = WikiGameDumb()
+        path = wiki_game.play(args.start, args.end, args.depth)
     elif args.gametype == 'async':
+        import asyncio
         wiki_game = WikiGameAsync()
-
-    if wiki_game is None:
+        path = asyncio.run(wiki_game.play(args.start, args.end, args.depth))
+    else:
         logger.error("Incorrect game_old type.")
         exit(-1)
 
-    path = wiki_game.play(args.start, args.end, args.depth)
-
-    print(path)
+    if path:
+        print(path.page_names)

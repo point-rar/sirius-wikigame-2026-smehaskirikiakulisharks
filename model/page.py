@@ -8,6 +8,10 @@ class Page:
         self.page_name = page_name
         self.depth = depth
 
+    def __lt__(self, other):
+        # Needed for PriorityQueue comparison if priorities are equal
+        return self.depth < other.depth
+
     # restoring the path through prev-links
     def path_to_root(self) -> Path:
         path = []
