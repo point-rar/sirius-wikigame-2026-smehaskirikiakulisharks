@@ -29,7 +29,7 @@ class WikiGameAsync(WikiGame):
         queue_fwd = asyncio.PriorityQueue()
         queue_bwd = asyncio.PriorityQueue()
 
-        async def add_to_queue(priority, page_name, page, direction):
+        async def add_to_queue(priority: int, page_name: str, page: Page, direction: int):
             item = (priority, page_name, (page, direction))
             if direction == 0:
                 await queue_fwd.put(item)
@@ -49,9 +49,11 @@ class WikiGameAsync(WikiGame):
         result: Optional[Path] = None
         stop_event = asyncio.Event()
 
-        async def get_priority(lenght: int, page: Page, direction: int):
+        async def get_priority(length: int, page: str, depth: int, direction: int):
             # TODO: сделайте тут что то рабочее по братски
-            return lenght
+            return -length * 10 + depth
+
+
 
         async def worker():
             nonlocal result
@@ -132,8 +134,7 @@ class WikiGameAsync(WikiGame):
                         candidates = []
 
                         for link in links:
-                            next_page_name = link.title
-
+                            next_page_name = link
                             if next_page_name in other_visited:
                                 logger.success(f"Path found! Meeting at '{next_page_name}'")
                                 meeting_page_other = other_visited[next_page_name]
@@ -157,24 +158,22 @@ class WikiGameAsync(WikiGame):
                                 if max_depth is None or cur_page.depth < max_depth:
                                     next_page = Page(next_page_name, cur_page.depth + 1, cur_page)
                                     own_visited[next_page_name] = next_page
-                                    candidates.append(next_page)
+                                    candidates.append(next_page.page_name)
+                        try:
+                            if candidates and not stop_event.is_set():
+                                max_chunk_size = self.wiki_parser.MAX_LINKS_IN_CHUNK
+                                if len(candidates) > max_chunk_size:
+                                    logger.debug(f"Chunk has {len(candidates)} candidates, limiting to {max_chunk_size}")
+                                    candidates = candidates[:max_chunk_size]
 
-                        if candidates and not stop_event.is_set():
-                            # Limit total chunk size to MAX_LINKS_IN_CHUNK
-                            max_chunk_size = self.wiki_parser.MAX_LINKS_IN_CHUNK
-                            if len(candidates) > max_chunk_size:
-                                logger.debug(f"Chunk has {len(candidates)} candidates, limiting to {max_chunk_size}")
-                                candidates = candidates[:max_chunk_size]
+                                page_infos = await self.wiki_parser.get_pages_info(candidates, direction)
+                                for next_page in candidates:
+                                    length = page_infos.get(next_page, 0)
+                                    priority = await get_priority(length, next_page, cur_page.depth + 1, direction)
 
-                            # For backward search, heuristics might differ, but using same for now
-                            candidate_names = [p.page_name for p in candidates]
-                            page_infos = await self.wiki_parser.get_pages_info(candidate_names)
-
-                            for next_page in candidates:
-                                length = page_infos.get(next_page.page_name, 0)
-
-                                priority = await get_priority(length, next_page, direction)
-                                await add_to_queue(priority, next_page.page_name, next_page, direction)
+                                    await add_to_queue(priority, next_page, Page(next_page, cur_page.depth + 1, cur_page), direction)
+                        except Exception as e:
+                            logger.error(f"1   {e}")
 
                     except Exception as e:
                         logger.error(f"Error processing {cur_page.page_name}: {e}")

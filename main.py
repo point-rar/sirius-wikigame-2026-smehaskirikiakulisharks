@@ -22,7 +22,7 @@ if __name__ == '__main__':
 
     DefaultStart = "Down syndrome"
     DefaultEnd = "Segment tree"
-    DefaultDepth = 4
+    DefaultDepth = 10
     DefaultGameType = 'async'
 
     argumentParser.add_argument('-s', '--start', default=DefaultStart)
@@ -44,6 +44,8 @@ if __name__ == '__main__':
     elif args.gametype == 'async':
         import asyncio
         wiki_game = WikiGameAsync()
+        # asyncio.run(wiki_game.wiki_parser.close())
+        # exit(0)
         path = asyncio.run(wiki_game.play(args.start, args.end, args.depth))
     else:
         logger.error("Incorrect game_old type.")

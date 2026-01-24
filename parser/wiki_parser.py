@@ -8,7 +8,6 @@ import asyncio
 from bs4 import BeautifulSoup
 from loguru import logger
 
-from model.link import Link
 from typing import Optional
 
 
@@ -22,6 +21,10 @@ class WikiParser():
         self.session = None
         self.last_request_time = 0
         self.rate_limit_lock = asyncio.Lock()
+        self.links_cache: dict[str, set[str]] = {}
+        self.backlinks_cache: dict[str, set[str]] = {}
+
+
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -114,9 +117,7 @@ class WikiParser():
                 raise
         return None
 
-    async def __get_page(self, page_name: str) -> list[Any] | Any:
-        # See: https://en.wikipedia.org/w/api.php?action=help&modules=parse
-        # https://en.wikipedia.org/w/api.php, https://ru.wikipedia.org/w/api.php
+    async def __get_page(self, page_name: str) -> list[Any]:
         params = {
             'action': 'parse',
             'page': page_name,
@@ -149,29 +150,13 @@ class WikiParser():
 
         return data['query']['backlinks']
 
-    async def get_links_batch(self, page_names: list[str]) -> Dict[str, set[Link]]:
-        if not page_names:
-            return {}
-
-        batch_size = 10
-        results = {}
-
-        for i in range(0, len(page_names), batch_size):
-            batch = page_names[i:i + batch_size]
-            tasks = [self._get_links_single(page_name) for page_name in batch]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for page_name, res in zip(batch, batch_results):
-                if isinstance(res, Exception):
-                    logger.error(f"Error getting links for '{page_name}': {res}")
-                    results[page_name] = set()
-                else:
-                    results[page_name] = res
-
-        return results
-
-    async def _get_links_single(self, page_name: str) -> set[Link]:
+    async def _get_links_single(self, page_name: str) -> set[str]:
         logger.info(f"Parsing links from '{page_name}'")
+
+        if page_name in self.links_cache:
+            logger.debug(f"Giving cached links for page {page_name}")
+            return self.links_cache[page_name]
+
         raw_links = await self.__get_page(page_name)
 
         # Limit to MAX_LINKS_PER_PAGE
@@ -181,32 +166,17 @@ class WikiParser():
 
         links = set()
         for raw_link in raw_links:
-            links.add(Link(raw_link["*"]))
+            links.add(raw_link["*"])
+
+        self.links_cache[page_name] = links
         return links
 
-    async def get_backlinks_batch(self, page_names: list[str]) -> Dict[str, set[Link]]:
-        if not page_names:
-            return {}
-
-        batch_size = 10
-        results = {}
-
-        for i in range(0, len(page_names), batch_size):
-            batch = page_names[i:i + batch_size]
-            tasks = [self._get_backlinks_single(page_name) for page_name in batch]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for page_name, res in zip(batch, batch_results):
-                if isinstance(res, Exception):
-                    logger.error(f"Error getting backlinks for '{page_name}': {res}")
-                    results[page_name] = set()
-                else:
-                    results[page_name] = res
-
-        return results
-
-    async def _get_backlinks_single(self, page_name: str) -> set[Link]:
+    async def _get_backlinks_single(self, page_name: str) -> set[str]:
         logger.info(f"Parsing backlinks for '{page_name}'")
+        if page_name in self.backlinks_cache:
+            logger.debug(f"Giving cached backlinks for page {page_name}")
+            return self.backlinks_cache[page_name]
+
         raw_links = await self._get_backlinks(page_name)
 
         # Limit to MAX_LINKS_PER_PAGE
@@ -216,33 +186,37 @@ class WikiParser():
 
         links = set()
         for raw_link in raw_links:
-            links.add(Link(raw_link["title"]))
+            links.add(raw_link["title"])
+
+        self.backlinks_cache[page_name] = links
         return links
 
     # Legacy wrappers using batch implementation with single item or direct call if preferred
-    async def get_links(self, page_name: str) -> set[Link]:
+    async def get_links(self, page_name: str) -> set[str]:
         return await self._get_links_single(page_name)
 
-    async def get_backlinks(self, page_name: str) -> set[Link]:
+    async def get_backlinks(self, page_name: str) -> set[str]:
         return await self._get_backlinks_single(page_name)
 
-    async def get_pages_info(self, page_names: list[str]) -> Dict[str, int]:
-        """
-        Returns a dictionary {page_name: number_of_links}
-        """
+    async def get_pages_info(self, page_names: list[str], direction: int) -> Dict[str, int]:
         if not page_names:
             return {}
 
-        # Split into chunks of 50
         chunk_size = 50
         results = {}
 
-        chunks = [page_names[i:i + chunk_size] for i in range(0, len(page_names), chunk_size)]
+        cache = self.links_cache if direction == 0 else self.backlinks_cache
+
+        filtered = []
+        for page_name in page_names:
+            if page_name in cache:
+                results[page_name] = cache[page_name]
+            else:
+                filtered.append(page_name)
+
+        chunks = [filtered[i:i + chunk_size] for i in range(0, len(filtered), chunk_size)]
 
         for chunk in chunks:
-            # We use 'pllimit': 'max' to get as many links as possible for estimation
-            # Note: with multiple pages, 'links' prop might return incomplete lists
-            # for strict counting, but good enough for heuristics.
             params = {
                 'action': 'query',
                 'prop': 'links',
@@ -256,15 +230,25 @@ class WikiParser():
 
             if data and data.get('query') and data['query'].get('pages'):
                 for page_id, page_info in data['query']['pages'].items():
-                    if 'missing' not in page_info:
-                        # Count links in the response
-                        # If 'links' is present, take its length. Otherwise 0.
-                        # For very large lists, API paginates, so this is just lower bound/heuristic.
-                        links_count = len(page_info.get('links', []))
-                        results[page_info['title']] = links_count
+                    if 'missing' in page_info:
+                        continue
+
+
+                    links = page_info.get('links', [])
+
+                    if len(links) == 0:
+                        continue
+
+                    links = links[:self.MAX_LINKS_PER_PAGE]
+                    links = [link['title'] for link in links]
+                    links = set(links)
+
+                    links_count = len(links)
+
+                    cache[page_info['title']] = links
+                    results[page_info['title']] = links_count
 
         return results
-
 
 class WikiParserDumb(WikiParser):
     def __init__(self):
@@ -272,8 +256,6 @@ class WikiParserDumb(WikiParser):
         self.session.headers.update({"User-Agent": "WikiGame/1.0 (contact: your_email@example.com)"})
 
     def __get_page(self, page_name: str) -> list[Any] | Any:
-        # See: https://en.wikipedia.org/w/api.php?action=help&modules=parse
-        # https://en.wikipedia.org/w/api.php, https://ru.wikipedia.org/w/api.php
         params = {
             'action': 'parse',
             'page': page_name,
@@ -287,11 +269,10 @@ class WikiParserDumb(WikiParser):
             return []
         return data['parse']['links']
 
-    def get_links(self, page_name: str) -> set[Link]:
+    def get_links(self, page_name: str) -> set[str]:
         logger.info(f"Parsing links from '{page_name}'")
         raw_links = self.__get_page(page_name)
 
-        # Limit to MAX_LINKS_PER_PAGE
         if len(raw_links) > self.MAX_LINKS_PER_PAGE:
             logger.debug(f"Page '{page_name}' has {len(raw_links)} links, limiting to {self.MAX_LINKS_PER_PAGE}")
             raw_links = raw_links[:self.MAX_LINKS_PER_PAGE]
@@ -299,6 +280,6 @@ class WikiParserDumb(WikiParser):
         links = set()
 
         for raw_link in raw_links:
-            links.add(Link(raw_link["*"]))
+            links.add(raw_link["*"])
 
         return links
